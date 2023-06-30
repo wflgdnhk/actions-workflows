@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      package_auth:
+        required: false
+        default: GITHUB_TOKEN
+        type: string
+      package_owner:
+        required: false
+        default: ${{ github.repository_owner }}
+        type: string
+      package_name:
+        required: false
+        default: ${{ github.event.repository.name }}
+        type: string
+      min_versions_to_keep:
+        required: false
+        default: 10
+        type: number
+      dockerfile_path:
+        required: false
+        default: Dockerfile
+        type: string
+    secrets:
+      CR_PAT:
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  PACKAGE_NAME: ${{ inputs.package_name }}
+  IMAGE_NAME: ${{ inputs.package_owner }}/${{ inputs.package_name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets[inputs.package_auth] }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          file: ${{ inputs.dockerfile_path }}
+          build-args: |
+            CHINA_MIRROR=false
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Delete untagged Package versions
+        uses: actions/delete-package-versions@v4
+        with:
+          owner: ${{ inputs.package_owner }}
+          package-name: ${{ env.PACKAGE_NAME }}
+          package-type: container
+          token: ${{ secrets[inputs.package_auth] }}
+          delete-only-untagged-versions: true
+
+      - name: Delete old Package versions
+        uses: actions/delete-package-versions@v4
+        with:
+          owner: ${{ inputs.package_owner }}
+          package-name: ${{ env.PACKAGE_NAME }}
+          package-type: container
+          token: ${{ secrets[inputs.package_auth] }}
+          min-versions-to-keep: ${{ inputs.min_versions_to_keep }}

@@ -1,0 +1,179 @@
+name: Build and Deploy
+
+on:
+  workflow_call:
+    inputs:
+      only_build:
+        required: true
+        type: boolean
+      package_auth:
+        required: false
+        default: GITHUB_TOKEN
+        type: string
+      package_owner:
+        required: false
+        default: ${{ github.repository_owner }}
+        type: string
+      package_name:
+        required: false
+        default: ${{ github.event.repository.name }}
+        type: string
+      min_versions_to_keep:
+        required: false
+        default: 10
+        type: number
+      kube_config:
+        required: false
+        default: KUBE_CONFIG
+        type: string
+      namespace_name:
+        required: true
+        type: string
+      resource_name:
+        required: true
+        type: string
+      container_name:
+        required: true
+        type: string
+      deploy_timeout:
+        required: true
+        type: number
+      dockerfile_path:
+        required: false
+        default: Dockerfile
+        type: string
+    secrets:
+      CR_PAT:
+        required: false
+      KUBE_CONFIG:
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  PACKAGE_NAME: ${{ inputs.package_name }}
+  IMAGE_NAME: ${{ inputs.package_owner }}/${{ inputs.package_name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets[inputs.package_auth] }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          file: ${{ inputs.dockerfile_path }}
+          build-args: |
+            CHINA_MIRROR=false
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Delete untagged Package versions
+        uses: actions/delete-package-versions@v4
+        with:
+          owner: ${{ inputs.package_owner }}
+          package-name: ${{ env.PACKAGE_NAME }}
+          package-type: container
+          token: ${{ secrets[inputs.package_auth] }}
+          delete-only-untagged-versions: true
+
+  deploy:
+    if: "!inputs.only_build"
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Kubernetes set context
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets[inputs.kube_config] }}
+
+      - name: Deploy manifests action for Kubernetes
+        env:
+          DOCKER_META_TAGS: ${{ needs.build.outputs.tags }}
+          NAMESPACE_NAME: ${{ inputs.namespace_name }}
+          RESOURCE_NAME: ${{ inputs.resource_name }}
+          CONTAINER_NAME: ${{ inputs.container_name }}
+          DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout }}
+        run: |
+          status_result="$(mktemp)"
+          Deploy_status() {
+              local -a status=$(kubectl -n ${NAMESPACE_NAME} get ${RESOURCE_NAME} -o jsonpath='({.status.availableReplicas} {.status.currentReplicas} {.status.readyReplicas} {.status.replicas} {.status.updatedReplicas})' | tee ${status_result})
+              if [ "${#status[@]}" -gt 0 ]; then
+                  local deploy_status="$(printf "%s\000" "${status[@]}" | sort -z -u | grep -z -c .)"
+                  echo "${deploy_status}" | tee -a ${status_result}
+              else
+                  echo "status len err: ${status[@]}"
+                  exit 1
+              fi
+          }
+          Print_status() {
+              echo "$(cat ${status_result})"
+          }
+          for tag in ${DOCKER_META_TAGS}; do
+              if [[ "${REGISTRY,,}/${IMAGE_NAME,,}:sha-${GITHUB_SHA}" == ${tag}* ]]; then
+                  sha_tag=${tag}
+              fi
+          done
+          echo "tag: ${sha_tag}"
+          if [ -n "${sha_tag}" ]; then
+              kubectl -n ${NAMESPACE_NAME} set image ${RESOURCE_NAME} ${CONTAINER_NAME}=${sha_tag}
+              until [ "$(Deploy_status)" -gt 1 ]; do
+                  Print_status
+                  sleep 1
+              done
+              Print_status
+              for ((i = 0; i < ${DEPLOY_TIMEOUT}; i++)); do
+                  echo "waiting: ${i}s"
+                  if [ "$(Deploy_status)" -eq 1 ]; then
+                      Print_status
+                      exit
+                  fi
+                  Print_status
+                  if [ ${i} -eq $((DEPLOY_TIMEOUT - 1)) ]; then
+                      exit 1
+                  fi
+                  sleep 1
+              done
+          else
+              exit 1
+          fi
+
+      - name: Delete old Package versions
+        uses: actions/delete-package-versions@v4
+        with:
+          owner: ${{ inputs.package_owner }}
+          package-name: ${{ env.PACKAGE_NAME }}
+          package-type: container
+          token: ${{ secrets[inputs.package_auth] }}
+          min-versions-to-keep: ${{ inputs.min_versions_to_keep }}
