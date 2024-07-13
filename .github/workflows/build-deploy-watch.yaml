@@ -85,16 +85,14 @@ jobs:
             type=sha
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           file: ${{ inputs.dockerfile_path }}
-          build-args: |
-            CHINA_MIRROR=false
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
       - name: Delete untagged Package versions
-        uses: actions/delete-package-versions@v4
+        uses: actions/delete-package-versions@v5
         with:
           owner: ${{ inputs.package_owner }}
           package-name: ${{ env.PACKAGE_NAME }}
@@ -103,7 +101,7 @@ jobs:
           delete-only-untagged-versions: true
 
   deploy:
-    if: "!inputs.only_build"
+    if: ${{ ! inputs.only_build }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -111,10 +109,10 @@ jobs:
 
     steps:
       - name: Setup Kubectl
-        uses: azure/setup-kubectl@v3
+        uses: azure/setup-kubectl@v4
 
       - name: Kubernetes set context
-        uses: azure/k8s-set-context@v3
+        uses: azure/k8s-set-context@v4
         with:
           kubeconfig: ${{ secrets[inputs.kube_config] }}
 
@@ -140,7 +138,7 @@ jobs:
           fi
 
       - name: Delete old Package versions
-        uses: actions/delete-package-versions@v4
+        uses: actions/delete-package-versions@v5
         with:
           owner: ${{ inputs.package_owner }}
           package-name: ${{ env.PACKAGE_NAME }}

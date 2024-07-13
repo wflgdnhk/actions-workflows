@@ -62,16 +62,14 @@ jobs:
             type=sha
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           file: ${{ inputs.dockerfile_path }}
-          build-args: |
-            CHINA_MIRROR=false
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
       - name: Delete untagged Package versions
-        uses: actions/delete-package-versions@v4
+        uses: actions/delete-package-versions@v5
         with:
           owner: ${{ inputs.package_owner }}
           package-name: ${{ env.PACKAGE_NAME }}
@@ -80,7 +78,7 @@ jobs:
           delete-only-untagged-versions: true
 
       - name: Delete old Package versions
-        uses: actions/delete-package-versions@v4
+        uses: actions/delete-package-versions@v5
         with:
           owner: ${{ inputs.package_owner }}
           package-name: ${{ env.PACKAGE_NAME }}
