@@ -26,13 +26,7 @@ on:
         required: false
         default: KUBE_CONFIG
         type: string
-      namespace_name:
-        required: true
-        type: string
-      resource_name:
-        required: true
-        type: string
-      container_name:
+      resources:
         required: true
         type: string
       deploy_timeout:
@@ -106,6 +100,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+    strategy:
+      matrix:
+        resources: ${{ fromJSON(inputs.resources) }}
 
     steps:
       - name: Setup Kubectl
@@ -119,17 +116,19 @@ jobs:
       - name: Deploy manifests action for Kubernetes
         env:
           DOCKER_META_TAGS: ${{ needs.build.outputs.tags }}
-          NAMESPACE_NAME: ${{ inputs.namespace_name }}
-          RESOURCE_NAME: ${{ inputs.resource_name }}
-          CONTAINER_NAME: ${{ inputs.container_name }}
+          NAMESPACE_NAME: ${{ matrix.resources.namespace }}
+          RESOURCE_NAME: ${{ matrix.resources.resource }}
+          CONTAINER_NAME: ${{ matrix.resources.container }}
           DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout }}
         run: |
           status_result="$(mktemp)"
+          status_length="$(mktemp)"
           Deploy_status() {
               local -a status=$(kubectl -n ${NAMESPACE_NAME} get ${RESOURCE_NAME} -o jsonpath='({.status.availableReplicas} {.status.currentReplicas} {.status.readyReplicas} {.status.replicas} {.status.updatedReplicas})' | tee ${status_result})
               if [ "${#status[@]}" -gt 0 ]; then
                   local deploy_status="$(printf "%s\000" "${status[@]}" | sort -z -u | grep -z -c .)"
                   echo "${deploy_status}" | tee -a ${status_result}
+                  echo "${#status[@]}" > ${status_length}
               else
                   echo "status len err: ${status[@]}"
                   exit 1
@@ -145,15 +144,16 @@ jobs:
           done
           echo "tag: ${sha_tag}"
           if [ -n "${sha_tag}" ]; then
+              [ "$(kubectl -n ${NAMESPACE_NAME} get ${RESOURCE_NAME} -o jsonpath="{.spec.template.spec.containers[?(@.name=='${CONTAINER_NAME}')].image}")" = "${sha_tag}" ] && exit
               kubectl -n ${NAMESPACE_NAME} set image ${RESOURCE_NAME} ${CONTAINER_NAME}=${sha_tag}
-              until [ "$(Deploy_status)" -gt 1 ]; do
+              until [ "$(Deploy_status)" -gt 1 ] || [ "$(cat ${status_length})" -lt 4 ]; do
                   Print_status
                   sleep 1
               done
               Print_status
               for ((i = 0; i < ${DEPLOY_TIMEOUT}; i++)); do
                   echo "waiting: ${i}s"
-                  if [ "$(Deploy_status)" -eq 1 ]; then
+                  if [ "$(Deploy_status)" -eq 1 ] && [ "$(cat ${status_length})" -gt 3 ]; then
                       Print_status
                       exit
                   fi
